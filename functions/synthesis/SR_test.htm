@@ -1,0 +1,191 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Speech Recognition — Improved</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, 18px; padding: 20px; }
+    #controls { margin-bottom: 12px; }
+    button { padding: 8px 12px; margin-right: 8px; }
+    #status { display:inline-block; margin-left:8px; font-weight:600; }
+    #output { white-space: pre-wrap; border:1px solid #ddd; padding:12px; border-radius:8px; min-height:120px; }
+    i.interim { color: #666; }
+
+    @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+    }
+    .listening {
+    animation: pulse 1s infinite;
+    color: #2e7dff;
+    }
+
+  </style>
+</head>
+<body>
+  <h2>Speech recognition demo (improved)</h2>
+  <div id="controls">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <span id="status">Unsupported</span>
+  </div>
+
+  <div id="output" aria-live="polite"></div>
+
+  <script>
+  (function () {
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusEl = document.getElementById('status');
+    const output = document.getElementById('output');
+
+    // Feature detection
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+    if (!SpeechRecognition) {
+      statusEl.textContent = 'SpeechRecognition not supported in this browser.';
+      startBtn.disabled = true;
+      stopBtn.disabled = true;
+      return;
+    }
+
+    let recognition = null;
+    let recognizing = false;
+    let shouldRestart = false; // whether we should restart on 'end' (used to implement continuous-like behavior)
+    let finalTranscript = '';
+    let restartTimeout = null;
+    let restartAttempts = 0;
+
+    function createRecognition() {
+      const r = new SpeechRecognition();
+      r.lang = 'en-US';
+      r.interimResults = true;
+      r.maxAlternatives = 1;
+      // Chrome sometimes stops after ~60s even with continuous — we'll restart in onend when desired
+      r.continuous = true;
+
+      r.onstart = () => {
+        recognizing = true;
+        statusEl.textContent = 'Listening…';
+        statusEl.classList.add('listening');
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+      };
+
+      r.onresult = (event) => {
+        // event.resultIndex is where the new results begin
+        let interim = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const res = event.results[i];
+          if (res.isFinal) {
+            const normalized = normalizeTranscript(res[0].transcript);
+            finalTranscript += (finalTranscript ? ' ' : '') + normalized;
+          } else {
+            interim += res[0].transcript;
+          }
+        }
+        renderOutput(finalTranscript, interim);
+      };
+
+      r.onerror = (err) => {
+        console.warn('Speech recognition error', err);
+        // handle common errors
+        if (err.error === 'not-allowed' || err.error === 'permission-denied') {
+          statusEl.textContent = 'Permission denied. Please allow microphone access.';
+          shouldRestart = false;
+          stopRecognition(); // ensure stopped
+        } else if (err.error === 'network') {
+          statusEl.textContent = 'Network error during speech recognition.';
+        } else if (err.error === 'no-speech') {
+          statusEl.textContent = 'No speech detected — try again.';
+        } else {
+          statusEl.textContent = `Error: ${err.error || 'unknown'}`;
+        }
+      };
+
+      r.onend = () => {
+        recognizing = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        statusEl.classList.remove('listening');
+
+        // If user requested continuous listening, restart gently with backoff
+        if (shouldRestart) {
+          // exponential backoff to avoid busy loop on persistent failure
+          restartAttempts = Math.min(restartAttempts + 1, 6);
+          const delay = Math.min(1000 * Math.pow(2, restartAttempts - 1), 10000);
+          statusEl.textContent = `Restarting recognition in ${delay/1000}s…`;
+          restartTimeout = setTimeout(() => {
+            // Recreate recognition to avoid stale internal state
+            recognition = createRecognition();
+            recognition.start();
+          }, delay);
+        } else {
+          statusEl.textContent = 'Stopped';
+          restartAttempts = 0;
+        }
+      };
+
+      return r;
+    }
+
+    function startRecognition() {
+      if (recognizing) return;
+      // reset if needed
+      if (restartTimeout) { clearTimeout(restartTimeout); restartTimeout = null; }
+      recognition = createRecognition();
+      shouldRestart = true; // user wants continuous listening until they click Stop
+      finalTranscript = finalTranscript || ''; // keep previous transcripts, or set to '' to clear on start
+      recognition.start();
+      restartAttempts = 0;
+    }
+
+    function stopRecognition() {
+      shouldRestart = false;
+      if (restartTimeout) { clearTimeout(restartTimeout); restartTimeout = null; }
+      if (recognition) {
+        try { recognition.onend = () => {}; /* prevent auto-restart logic on immediate stop */ } catch(e) {}
+        try { recognition.stop(); } catch(e) {}
+      }
+      recognizing = false;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      statusEl.textContent = 'Stopped';
+    }
+
+    function renderOutput(finalText, interimText) {
+      // Escape to avoid injection
+      function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+      let html = esc(finalText || '');
+      if (interimText) {
+        html += (html ? ' ' : '') + `<i class="interim">${esc(interimText)}</i>`;
+      }
+      output.innerHTML = html;
+    }
+
+    function normalizeTranscript(s) {
+      // simple heuristics: trim, lower-case, capitalise first letter, ensure punctuation at ends
+      s = s.trim();
+      if (!s) return '';
+      s = s.replace(/\s+/g, ' ');
+      // naive punctuation: add period if no terminal punctuation
+      const last = s[s.length - 1];
+      if (!/[.!?…:;]$/.test(last)) s = s + '.';
+      // capitalise first char
+      s = s[0].toUpperCase() + s.slice(1);
+      return s;
+    }
+
+    // button wiring
+    startBtn.addEventListener('click', () => {
+      startRecognition();
+    });
+    stopBtn.addEventListener('click', () => {
+      stopRecognition();
+    });
+
+    // initial UI state
+    statusEl.textContent = 'Ready';
+  })();
+  </script>
+</body>
+</html>
