@@ -71,7 +71,8 @@ class VoiceRecorder(object):
         """
         Save audio recording (.wav file)
         """
-        with wave.open(self.output_file, mode='wb') as wf:
+        os.makedirs("audio_samples", exist_ok=True)
+        with wave.open("audio_samples/" + self.output_file, mode='wb') as wf:
             wf.setnchannels(self.channels)
             wf.setsampwidth(self.audio.get_sample_size(self.format))
             wf.setframerate(self.rate)
